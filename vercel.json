@@ -1,0 +1,6 @@
+{
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/mcp", "methods": ["POST"], "dest": "mcp-server/api/mcp.js" }
+  ]
+}

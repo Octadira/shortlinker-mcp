@@ -74,7 +74,7 @@ setInterval(() => broadcast('ping', { ts: Date.now() }), 25000);
 
 // --- Authentication Hook ---
 fastify.addHook('preHandler', (request, reply, done) => {
-  if (request.routerPath === '/health') return done();
+  if (request.routeOptions.url === '/health') return done();
 
   if (!MCP_TOKEN) {
     fastify.log.error('MCP_TOKEN is not configured on the server.');

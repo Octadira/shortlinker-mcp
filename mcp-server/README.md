@@ -1,7 +1,7 @@
 # Shortlinker MCP — Setup Guide
 
 ## Overview
-- Remote HTTP JSON-RPC endpoint at `/mcp`, protected by Bearer token.
+- Remote HTTP JSON-RPC endpoint at `/api/mcp`, protected by Bearer token.
 - Local STDIO mode for development (no HTTP, no token).
 - Uses the same Neon (Vercel Postgres) as your app; DB secrets live only in Vercel.
 
@@ -11,20 +11,40 @@
    - Add `MCP_TOKEN` (strong random value).
    - Add `SHORTLINKER_URL` (e.g., `https://go4l.ink`).
    - Postgres: ensure the Vercel project is connected to the same Neon DB (no secrets in clients).
-3. Deploy. Endpoint is `POST https://<project>.vercel.app/mcp`.
+3. Deploy. Endpoint is `https://<project>.vercel.app/api/mcp`.
 
 ## Quick test with cURL
 ```bash
-curl -sS -X POST "https://<project>.vercel.app/mcp" \
+curl -sS -X POST "https://<project>.vercel.app/api/mcp" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $MCP_TOKEN" \
   -d '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | jq .
 ```
 Expected: a JSON-RPC response listing tools.
 
+## SSE usage (streaming)
+
+### Heartbeat stream (GET)
+```bash
+curl -v -N "https://<project>.vercel.app/api/mcp" \
+  -H "Accept: text/event-stream" \
+  -H "Authorization: Bearer $MCP_TOKEN"
+```
+Expected: an initial `ready` event followed by periodic `ping` events.
+
+### Streaming a JSON-RPC response (POST)
+```bash
+curl -N -X POST "https://<project>.vercel.app/api/mcp" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "Authorization: Bearer $MCP_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}'
+```
+Expected: one `data:` frame containing the JSON-RPC result, then the stream closes.
+
 ## MCP Clients (HTTP, with Bearer)
 All clients must use:
-- URL: `https://<project>.vercel.app/mcp`
+- URL: `https://<project>.vercel.app/api/mcp`
 - Header: `Authorization: Bearer <MCP_TOKEN>`
 
 ### Claude Desktop (HTTP)
@@ -33,7 +53,7 @@ If your version supports MCP-over-HTTP with custom headers, add to `claude_deskt
 {
   "mcpServers": {
     "shortlinker-mcp": {
-      "url": "https://<project>.vercel.app/mcp",
+      "url": "https://<project>.vercel.app/api/mcp",
       "headers": {
         "Authorization": "Bearer <MCP_TOKEN>"
       }
@@ -50,7 +70,7 @@ Add to `.cursor/mcp_config.json` in your workspace:
   "mcp": {
     "servers": {
       "shortlinker-mcp": {
-        "url": "https://<project>.vercel.app/mcp",
+        "url": "https://<project>.vercel.app/api/mcp",
         "headers": {
           "Authorization": "Bearer <MCP_TOKEN>"
         }
@@ -67,7 +87,7 @@ Add to `.vscode/settings.json`:
   "github.copilot.chat.mcp": {
     "servers": {
       "shortlinker-mcp": {
-        "url": "https://<project>.vercel.app/mcp",
+        "url": "https://<project>.vercel.app/api/mcp",
         "headers": {
           "Authorization": "Bearer <MCP_TOKEN>"
         }
@@ -85,7 +105,7 @@ Add to `.continue/config.json`:
     "servers": [
       {
         "name": "shortlinker-mcp",
-        "url": "https://<project>.vercel.app/mcp",
+        "url": "https://<project>.vercel.app/api/mcp",
         "headers": {
           "Authorization": "Bearer <MCP_TOKEN>"
         }
@@ -98,7 +118,7 @@ Add to `.continue/config.json`:
 ### Aider CLI (HTTP)
 If your Aider build supports MCP over HTTP:
 ```bash
-aider --mcp-http "shortlinker-mcp=https://<project>.vercel.app/mcp" \
+aider --mcp-http "shortlinker-mcp=https://<project>.vercel.app/api/mcp" \
       --mcp-http-header "shortlinker-mcp=Authorization: Bearer $MCP_TOKEN"
 ```
 
@@ -116,4 +136,4 @@ Configure clients to launch a local process instead of HTTP:
 ## Security notes
 - Never share Postgres credentials with MCP clients.
 - Rotate `MCP_TOKEN` periodically; revoke if leaked.
-- Optionally enforce Cloudflare Access/IP allowlist/mTLS in front of `/mcp`.
+- Optionally enforce Cloudflare Access/IP allowlist/mTLS in front of `/api/mcp`.

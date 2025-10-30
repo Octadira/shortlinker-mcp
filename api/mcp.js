@@ -10,7 +10,7 @@ import { sql } from '@vercel/postgres';
 import { z } from 'zod';
 
 function buildServer() {
-  const srv = new Server({ name: 'shortlinker-neon-http', version: '1.0.0' }, { capabilities: { tools: {}, prompts: {} } });
+  const srv = new Server({ name: 'shortlinker-neon-http', version: '1.1.0' }, { capabilities: { tools: {}, prompts: {} } });
 
   // Register handlers
   srv.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -71,13 +71,41 @@ function buildServer() {
 function jsonRpcSuccess(id, result) { return { jsonrpc: '2.0', id, result }; }
 function jsonRpcError(id, code, message) { return { jsonrpc: '2.0', id, error: { code, message } }; }
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+function writeSse(res, data) {
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
 
+export default async function handler(req, res) {
   const expected = process.env.MCP_TOKEN;
   const auth = req.headers['authorization'] || req.headers['Authorization'];
   if (!expected) return res.status(500).json({ error: 'MCP_TOKEN not configured' });
   if (!auth || !auth.startsWith('Bearer ') || auth.slice(7).trim() !== expected) return res.status(401).json({ error: 'Unauthorized' });
+
+  // SSE via GET (LM Studio and others)
+  if (req.method === 'GET') {
+    // Only allow SSE when Accept asks for it
+    const accept = req.headers['accept'] || '';
+    if (!accept.includes('text/event-stream')) return res.status(405).json({ error: 'Method Not Allowed' });
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+
+    // Optionally send a hello event so clients confirm connection
+    writeSse(res, { event: 'ready' });
+
+    // Keep-alive ping every 25s
+    const ping = setInterval(() => writeSse(res, { event: 'ping', ts: Date.now() }), 25000);
+
+    req.on('close', () => { clearInterval(ping); try { res.end(); } catch {} });
+    return; // SSE stream stays open
+  }
+
+  // JSON-RPC over POST
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
   let body;
   try {
@@ -92,29 +120,47 @@ export default async function handler(req, res) {
   try {
     const srv = buildServer();
 
-    // Manual dispatch for common MCP JSON-RPC methods used by clients
+    // If client prefers SSE for response streaming on POST
+    const wantsSse = (req.headers['accept'] || '').includes('text/event-stream');
+    if (wantsSse) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+
+      // Minimal JSON-RPC streaming: one event with result or error, then end
+      const finish = (frame) => { writeSse(res, frame); try { res.end(); } catch {} };
+
+      if (method === 'tools/list') {
+        const result = await srv.__handlers.listTools();
+        return finish(jsonRpcSuccess(id, result));
+      }
+      if (method === 'tools/call') {
+        const { name, arguments: args } = params || {};
+        if (!name || !(name in srv.__toolDispatch)) return finish(jsonRpcError(id, -32601, `Unknown tool: ${name}`));
+        try { const result = await srv.__toolDispatch[name](args || {}); return finish(jsonRpcSuccess(id, result)); }
+        catch (e) { return finish(jsonRpcError(id, -32000, e.message)); }
+      }
+      if (method === 'prompts/list') return finish(jsonRpcSuccess(id, { prompts: [] }));
+      if (method === 'prompts/get') return finish(jsonRpcError(id, -32601, 'No prompts'));
+      return finish(jsonRpcError(id, -32601, 'Method not found'));
+    }
+
+    // Regular JSON response
     if (method === 'tools/list') {
       const result = await srv.__handlers.listTools();
       return res.status(200).json(jsonRpcSuccess(id, result));
     }
     if (method === 'tools/call') {
       const { name, arguments: args } = params || {};
-      if (!name || !(name in srv.__toolDispatch)) {
-        return res.status(200).json(jsonRpcError(id, -32601, `Unknown tool: ${name}`));
-      }
-      try {
-        const result = await srv.__toolDispatch[name](args || {});
-        return res.status(200).json(jsonRpcSuccess(id, result));
-      } catch (e) {
-        return res.status(200).json(jsonRpcError(id, -32000, e.message));
-      }
+      if (!name || !(name in srv.__toolDispatch)) return res.status(200).json(jsonRpcError(id, -32601, `Unknown tool: ${name}`));
+      try { const result = await srv.__toolDispatch[name](args || {}); return res.status(200).json(jsonRpcSuccess(id, result)); }
+      catch (e) { return res.status(200).json(jsonRpcError(id, -32000, e.message)); }
     }
-    if (method === 'prompts/list') {
-      return res.status(200).json(jsonRpcSuccess(id, { prompts: [] }));
-    }
-    if (method === 'prompts/get') {
-      return res.status(200).json(jsonRpcError(id, -32601, 'No prompts'));
-    }
+    if (method === 'prompts/list') return res.status(200).json(jsonRpcSuccess(id, { prompts: [] }));
+    if (method === 'prompts/get') return res.status(200).json(jsonRpcError(id, -32601, 'No prompts'));
 
     return res.status(200).json(jsonRpcError(id, -32601, 'Method not found'));
   } catch (e) {

@@ -1,16 +1,20 @@
 {
   "name": "shortlinker-mcp",
-  "version": "1.0.0",
-  "description": "Secure MCP server for Shortlinker using Vercel Postgres (Neon)",
+  "version": "1.3.0",
+  "description": "Secure MCP server for Shortlinker using Neon (Vercel Postgres) — supports Vercel, VPS/CloudPanel/PM2, and STDIO",
   "private": false,
   "type": "module",
   "scripts": {
-    "start": "node mcp-server/server.js",
-    "dev": "node mcp-server/server.js --debug"
+    "start": "node mcp-http-server.js",
+    "dev": "NODE_ENV=development node mcp-http-server.js",
+    "vercel": "node api/mcp.js",
+    "stdio": "node mcp-server/server.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@vercel/postgres": "^0.10.0",
-    "zod": "^3.24.0"
+    "zod": "^3.24.0",
+    "express": "^4.18.3",
+    "cors": "^2.8.5"
   }
 }

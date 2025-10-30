@@ -1,15 +1,15 @@
-// api/mcp.js (timeout-aware SSE)
+// api/mcp.js (headers-safe SSE)
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { sql } from '@vercel/postgres';
 import { z } from 'zod';
 
-const FIVE_MIN_MS = 5 * 60 * 1000; // Vercel max for most plans
-const SSE_PING_MS = 10 * 1000; // more frequent keep-alive
-const SSE_GRACE_MS = 5 * 1000; // close gracefully before hard timeout
+const FIVE_MIN_MS = 5 * 60 * 1000;
+const SSE_PING_MS = 10 * 1000;
+const SSE_GRACE_MS = 5 * 1000;
 
 function buildServer() {
-  const srv = new Server({ name: 'shortlinker-neon-http', version: '1.2.0' }, { capabilities: { tools: {}, prompts: {} } });
+  const srv = new Server({ name: 'shortlinker-neon-http', version: '1.2.1' }, { capabilities: { tools: {}, prompts: {} } });
   srv.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       { name: 'create_short_link', description: 'Create a new shortened URL', inputSchema: { type: 'object', properties: { long_url: { type: 'string', format: 'uri' }, short_code: { type: 'string', pattern: '^[a-zA-Z0-9_-]{3,20}$' } }, required: ['long_url'] } },
@@ -71,24 +71,15 @@ export default async function handler(req, res) {
   if (!expected) return res.status(500).json({ error: 'MCP_TOKEN not configured' });
   if (!auth || !auth.startsWith('Bearer ') || auth.slice(7).trim() !== expected) return res.status(401).json({ error: 'Unauthorized' });
 
-  // SSE via GET (heartbeat stream with graceful close before Vercel timeout)
   if (req.method === 'GET') {
     const accept = req.headers['accept'] || '';
     if (!accept.includes('text/event-stream')) return res.status(405).json({ error: 'Method Not Allowed' });
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-
     writeSse(res, { event: 'ready' });
 
-    const startedAt = Date.now();
     const ping = setInterval(() => writeSse(res, { event: 'ping', ts: Date.now() }), SSE_PING_MS);
-
-    // Graceful close a few seconds before hard timeout (let clients reconnect)
-    const graceClose = setTimeout(() => {
-      writeSse(res, { event: 'closing', reason: 'server_timeout_incoming', reconnect: true });
-      try { res.end(); } catch {}
-    }, FIVE_MIN_MS - SSE_GRACE_MS);
-
+    const graceClose = setTimeout(() => { writeSse(res, { event: 'closing', reason: 'server_timeout_incoming', reconnect: true }); try { res.end(); } catch {} }, FIVE_MIN_MS - SSE_GRACE_MS);
     req.on('close', () => { clearInterval(ping); clearTimeout(graceClose); try { res.end(); } catch {} });
     return;
   }
@@ -100,31 +91,39 @@ export default async function handler(req, res) {
   const { jsonrpc, id, method, params } = body || {};
   if (jsonrpc !== '2.0' || !method) return res.status(400).json(jsonRpcError(id ?? null, -32600, 'Invalid Request'));
 
-  try {
-    const srv = buildServer();
-    const wantsSse = (req.headers['accept'] || '').includes('text/event-stream');
+  const srv = buildServer();
+  const wantsSse = (req.headers['accept'] || '').includes('text/event-stream');
 
-    if (wantsSse) {
+  if (wantsSse) {
+    // Ensure headers are written exactly once
+    if (!res.headersSent) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-      const finish = (frame) => { writeSse(res, frame); try { res.end(); } catch {} };
+    }
+    const finish = (frame) => { writeSse(res, frame); try { res.end(); } catch {} };
 
+    try {
       if (method === 'tools/list') { const result = await srv.__handlers.listTools(); return finish(jsonRpcSuccess(id, result)); }
       if (method === 'tools/call') {
         const { name, arguments: args } = params || {};
         if (!name || !(name in srv.__toolDispatch)) return finish(jsonRpcError(id, -32601, `Unknown tool: ${name}`));
-        try { const result = await srv.__toolDispatch[name](args || {}); return finish(jsonRpcSuccess(id, result)); } catch (e) { return finish(jsonRpcError(id, -32000, e.message)); }
+        const result = await srv.__toolDispatch[name](args || {});
+        return finish(jsonRpcSuccess(id, result));
       }
       if (method === 'prompts/list') return finish(jsonRpcSuccess(id, { prompts: [] }));
       if (method === 'prompts/get') return finish(jsonRpcError(id, -32601, 'No prompts'));
       return finish(jsonRpcError(id, -32601, 'Method not found'));
+    } catch (e) {
+      return finish(jsonRpcError(id ?? null, -32603, e.message));
     }
+  }
 
-    // Regular JSON response
+  try {
     if (method === 'tools/list') { const result = await srv.__handlers.listTools(); return res.status(200).json(jsonRpcSuccess(id, result)); }
     if (method === 'tools/call') {
       const { name, arguments: args } = params || {};
       if (!name || !(name in srv.__toolDispatch)) return res.status(200).json(jsonRpcError(id, -32601, `Unknown tool: ${name}`));
-      try { const result = await srv.__toolDispatch[name](args || {}); return res.status(200).json(jsonRpcSuccess(id, result)); } catch (e) { return res.status(200).json(jsonRpcError(id, -32000, e.message)); }
+      const result = await srv.__toolDispatch[name](args || {});
+      return res.status(200).json(jsonRpcSuccess(id, result));
     }
     if (method === 'prompts/list') return res.status(200).json(jsonRpcSuccess(id, { prompts: [] }));
     if (method === 'prompts/get') return res.status(200).json(jsonRpcError(id, -32601, 'No prompts'));

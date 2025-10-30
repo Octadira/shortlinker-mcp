@@ -82,9 +82,9 @@ app.addHook('preHandler', (request, reply, done) => {
 });
 
 // --- Routes ---
-app.get('/api/health', (req, reply) => reply.send({ status: 'ok' }));
+app.get('/health', (req, reply) => reply.send({ status: 'ok' }));
 
-app.all('/api/mcp', async (req, reply) => {
+app.all('/', async (req, reply) => {
   reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   sendSse(reply, 'ready', {});
 

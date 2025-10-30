@@ -5,19 +5,17 @@ import sensible from '@fastify/sensible';
 import { sql } from '@vercel/postgres';
 import { z } from 'zod';
 
-// --- Configuration ---
+// This file is now api/mcp.js, and Vercel routes /api/mcp to it.
+// The Fastify server will handle any request that reaches it.
+
 const MCP_TOKEN = process.env.MCP_TOKEN;
 const SERVER_URL = process.env.SHORTLINKER_URL || 'https://go4l.ink';
 
-// --- Fastify App Initialization ---
-const app = Fastify({
-  logger: true,
-});
-
+const app = Fastify({ logger: true });
 app.register(cors, { origin: '*' });
 app.register(sensible);
 
-// --- Tool Implementation (same as before) ---
+// --- Tool Implementation (unchanged) ---
 const tools = {
   create_short_link: async (args) => {
     const schema = z.object({ long_url: z.string().url(), short_code: z.string().optional() });
@@ -56,38 +54,30 @@ const tools = {
 
 const toolDefinitions = Object.keys(tools).map(name => ({ name, description: `${name.replace(/_/g, ' ')} link(s)` }));
 
-// --- JSON-RPC Helper ---
 const jsonRpcSuccess = (id, result) => ({ jsonrpc: '2.0', id, result });
 const jsonRpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
 
-// --- SSE Stream Manager (simplified for serverless) ---
-// Vercel manages connections, we just need to write the response.
 const sendSse = (reply, event, data) => {
   reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 };
 
-// --- Authentication Hook ---
-app.addHook('preHandler', (request, reply, done) => {
-  if (request.url === '/api/health') return done();
-
+// --- Main Handler Logic ---
+app.all('/*', async (req, reply) => {
+  // Authentication
   if (!MCP_TOKEN) {
-    app.log.error('MCP_TOKEN is not configured on the server.');
+    app.log.error('MCP_TOKEN is not configured.');
     throw app.httpErrors.internalServerError('Server configuration error');
   }
-  const token = request.headers.authorization?.slice(7);
+  const token = req.headers.authorization?.slice(7);
   if (token !== MCP_TOKEN) {
     throw app.httpErrors.unauthorized();
   }
-  done();
-});
 
-// --- Routes ---
-app.get('/health', (req, reply) => reply.send({ status: 'ok' }));
-
-app.all('/', async (req, reply) => {
+  // SSE Handshake
   reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   sendSse(reply, 'ready', {});
 
+  // RPC Call Handling
   if (req.method === 'POST') {
     const { jsonrpc, id, method, params } = req.body;
     if (jsonrpc !== '2.0' || !method) {
@@ -115,8 +105,7 @@ app.all('/', async (req, reply) => {
       sendSse(reply, 'jsonrpc', jsonRpcError(id, code, message));
     }
   }
-  // For serverless, we don't keep the connection open indefinitely.
-  // Vercel will manage the timeout.
+  
   reply.raw.end();
 });
 

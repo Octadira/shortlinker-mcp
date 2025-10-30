@@ -88,6 +88,7 @@ app.get('/mcp', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
 
   // Immediately send a ready event
   writeSse(res, { event: 'ready' });
@@ -132,11 +133,11 @@ app.post('/mcp', async (req, res) => {
     const frame = await handleCall();
     if (!wantsSse) return res.status(200).json(frame);
 
-    // SSE one-shot response for clients that prefer streaming
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
     writeSse(res, frame);
     try { res.end(); } catch {}
   } catch (e) {
@@ -146,6 +147,7 @@ app.post('/mcp', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
     writeSse(res, frame);
     try { res.end(); } catch {}
   }

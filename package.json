@@ -1,7 +1,7 @@
 {
   "name": "shortlinker-mcp",
-  "version": "1.3.0",
-  "description": "Secure MCP server for Shortlinker using Neon Postgres — supports VPS/CloudPanel/PM2 and STDIO",
+  "version": "1.3.2",
+  "description": "Secure MCP server for Shortlinker using Neon Postgres — HTTP SSE for LM Studio/Gemini, VPS/CloudPanel/PM2 + STDIO",
   "private": false,
   "type": "module",
   "scripts": {

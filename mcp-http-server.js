@@ -136,7 +136,10 @@ app.all('/mcp', checkAuth, async (req, res) => {
       if (method === 'tools/list') {
         resultFrame = jsonRpcSuccess(id, { tools: toolDefinitions });
       } else if (method === 'tools/call') {
-        const { name, arguments: args } = params || {};
+        // **FIXED**: Avoid destructuring the reserved keyword 'arguments'
+        const name = params?.name;
+        const args = params?.arguments;
+
         if (!name || !tools[name]) {
           resultFrame = jsonRpcError(id, -32601, `Method not found: ${name}`);
         } else {

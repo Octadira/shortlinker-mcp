@@ -74,10 +74,7 @@ function buildServer() {
 
 function jsonRpcSuccess(id, result) { return { jsonrpc: '2.0', id, result }; }
 function jsonRpcError(id, code, message) { return { jsonrpc: '2.0', id, error: { code, message } }; }
-function writeSse(res, event, data) {
-  res.write(`event: ${event}\n`);
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
-}
+function writeSse(res, data) { res.write(`data: ${JSON.stringify(data)}\n\n`); }
 
 // Proper SSE endpoint compatible with LM Studio / Gemini CLI
 app.get('/mcp', (req, res) => {
@@ -94,10 +91,10 @@ app.get('/mcp', (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
 
   // Immediately send a ready event
-  writeSse(res, 'ready', {});
+  writeSse(res, { event: 'ready' });
 
   // Keep-alive ping
-  const ping = setInterval(() => writeSse(res, 'ping', { ts: Date.now() }), SSE_PING_MS);
+  const ping = setInterval(() => writeSse(res, { event: 'ping', ts: Date.now() }), SSE_PING_MS);
 
   // Cleanup on disconnect
   req.on('close', () => { clearInterval(ping); try { res.end(); } catch {} });
@@ -141,18 +138,15 @@ app.post('/mcp', async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
-    writeSse(res, 'jsonrpc', frame);
-    try { res.end(); } catch {}
+    writeSse(res, frame);
   } catch (e) {
     const frame = jsonRpcError(id ?? null, -32603, e.message || 'Internal error');
-    if (!wantsSse) return res.status(500).json(frame);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering in Nginx
-    writeSse(res, 'jsonrpc', frame);
-    try { res.end(); } catch {}
+    writeSse(res, frame);
   }
 });
 

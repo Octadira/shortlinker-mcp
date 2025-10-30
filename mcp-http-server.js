@@ -5,20 +5,17 @@ import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { sql } from '@vercel/postgres';
 import { z } from 'zod';
 
-// Express HTTP server for MCP (VPS/CloudPanel/PM2)
 const app = express();
 const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-const FIVE_MIN_MS = 10 * 60 * 1000; // VPS can handle long-running, keep generous window
-const SSE_PING_MS = 30 * 1000;
-const SSE_GRACE_MS = 10 * 1000;
+// SSE tuning
+const SSE_PING_MS = 25000; // 25s ping to keep proxies alive
 
 function buildServer() {
-  const srv = new Server({ name: 'shortlinker-neon-vps', version: '1.3.1' }, { capabilities: { tools: {}, prompts: {} } });
+  const srv = new Server({ name: 'shortlinker-neon-vps', version: '1.3.2' }, { capabilities: { tools: {}, prompts: {} } });
 
-  // Define tool functions
   const serverUrl = process.env.SHORTLINKER_URL || 'https://go4l.ink';
 
   async function create_short_link(args) {
@@ -59,9 +56,8 @@ function buildServer() {
     return { content: [{ type: 'text', text: `Deleted ${short_code}` }] };
   }
 
-  // Attach dispatch and listTools handler (without relying on internal requestHandlers)
   srv.__toolDispatch = { create_short_link, get_link_info, list_links, get_link_stats, delete_link };
-  srv.__handlers = { 
+  srv.__handlers = {
     listTools: async () => ({
       tools: [
         { name: 'create_short_link', description: 'Create a new shortened URL', inputSchema: { type: 'object', properties: { long_url: { type: 'string', format: 'uri' }, short_code: { type: 'string', pattern: '^[a-zA-Z0-9_-]{3,20}$' } }, required: ['long_url'] } },
@@ -80,70 +76,82 @@ function jsonRpcSuccess(id, result) { return { jsonrpc: '2.0', id, result }; }
 function jsonRpcError(id, code, message) { return { jsonrpc: '2.0', id, error: { code, message } }; }
 function writeSse(res, data) { res.write(`data: ${JSON.stringify(data)}\n\n`); }
 
-app.all('/mcp', async (req, res) => {
+// Proper SSE endpoint compatible with LM Studio / Gemini CLI
+app.get('/mcp', (req, res) => {
   const expected = process.env.MCP_TOKEN;
   const auth = req.headers['authorization'];
   if (!expected) return res.status(500).json({ error: 'MCP_TOKEN not configured' });
   if (!auth || !auth.startsWith('Bearer ') || auth.slice(7).trim() !== expected) return res.status(401).json({ error: 'Unauthorized' });
 
-  if (req.method === 'GET') {
-    const accept = req.headers['accept'] || '';
-    if (!accept.includes('text/event-stream')) return res.status(405).json({ error: 'Method Not Allowed' });
+  // Send headers ONCE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
 
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*' });
-    writeSse(res, { event: 'ready' });
+  // Immediately send a ready event
+  writeSse(res, { event: 'ready' });
 
-    const ping = setInterval(() => writeSse(res, { event: 'ping', ts: Date.now() }), SSE_PING_MS);
-    const graceClose = setTimeout(() => { writeSse(res, { event: 'closing', reason: 'server_timeout_incoming', reconnect: true }); try { res.end(); } catch {} }, FIVE_MIN_MS - SSE_GRACE_MS);
-    req.on('close', () => { clearInterval(ping); clearTimeout(graceClose); try { res.end(); } catch {} });
-    return;
-  }
+  // Keep-alive ping
+  const ping = setInterval(() => writeSse(res, { event: 'ping', ts: Date.now() }), SSE_PING_MS);
 
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+  // Cleanup on disconnect
+  req.on('close', () => { clearInterval(ping); try { res.end(); } catch {} });
+});
 
-  const { jsonrpc, id, method, params } = req.body || {};
+// JSON and streaming RPC over POST
+app.post('/mcp', async (req, res) => {
+  const expected = process.env.MCP_TOKEN;
+  const auth = req.headers['authorization'];
+  if (!expected) return res.status(500).json({ error: 'MCP_TOKEN not configured' });
+  if (!auth || !auth.startsWith('Bearer ') || auth.slice(7).trim() !== expected) return res.status(401).json({ error: 'Unauthorized' });
+
+  const accept = req.headers['accept'] || '';
+  const wantsSse = accept.includes('text/event-stream');
+
+  let body = req.body || {};
+  const { jsonrpc, id, method, params } = body;
   if (jsonrpc !== '2.0' || !method) return res.status(400).json(jsonRpcError(id ?? null, -32600, 'Invalid Request'));
 
   const srv = buildServer();
-  const wantsSse = (req.headers['accept'] || '').includes('text/event-stream');
 
-  if (wantsSse) {
-    if (!res.headersSent) { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*' }); }
-    const finish = (frame) => { writeSse(res, frame); try { res.end(); } catch {} };
-
-    try {
-      if (method === 'tools/list') { const result = await srv.__handlers.listTools(); return finish(jsonRpcSuccess(id, result)); }
-      if (method === 'tools/call') {
-        const { name, arguments: args } = params || {};
-        if (!name || !(name in srv.__toolDispatch)) return finish(jsonRpcError(id, -32601, `Unknown tool: ${name}`));
-        const result = await srv.__toolDispatch[name](args || {});
-        return finish(jsonRpcSuccess(id, result));
-      }
-      if (method === 'prompts/list') return finish(jsonRpcSuccess(id, { prompts: [] }));
-      if (method === 'prompts/get') return finish(jsonRpcError(id, -32601, 'No prompts'));
-      return finish(jsonRpcError(id, -32601, 'Method not found'));
-    } catch (e) {
-      return finish(jsonRpcError(id ?? null, -32603, e.message));
-    }
-  }
-
-  try {
-    if (method === 'tools/list') { const result = await srv.__handlers.listTools(); return res.status(200).json(jsonRpcSuccess(id, result)); }
+  const handleCall = async () => {
+    if (method === 'tools/list') return jsonRpcSuccess(id, await srv.__handlers.listTools());
     if (method === 'tools/call') {
       const { name, arguments: args } = params || {};
-      if (!name || !(name in srv.__toolDispatch)) return res.status(200).json(jsonRpcError(id, -32601, `Unknown tool: ${name}`));
+      if (!name || !(name in srv.__toolDispatch)) return jsonRpcError(id, -32601, `Unknown tool: ${name}`);
       const result = await srv.__toolDispatch[name](args || {});
-      return res.status(200).json(jsonRpcSuccess(id, result));
+      return jsonRpcSuccess(id, result);
     }
-    if (method === 'prompts/list') return res.status(200).json(jsonRpcSuccess(id, { prompts: [] }));
-    if (method === 'prompts/get') return res.status(200).json(jsonRpcError(id, -32601, 'No prompts'));
-    return res.status(200).json(jsonRpcError(id, -32601, 'Method not found'));
+    if (method === 'prompts/list') return jsonRpcSuccess(id, { prompts: [] });
+    if (method === 'prompts/get') return jsonRpcError(id, -32601, 'No prompts');
+    return jsonRpcError(id, -32601, 'Method not found');
+  };
+
+  try {
+    const frame = await handleCall();
+    if (!wantsSse) return res.status(200).json(frame);
+
+    // SSE one-shot response for clients that prefer streaming
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    writeSse(res, frame);
+    try { res.end(); } catch {}
   } catch (e) {
-    return res.status(500).json(jsonRpcError(id ?? null, -32603, e.message));
+    const frame = jsonRpcError(id ?? null, -32603, e.message || 'Internal error');
+    if (!wantsSse) return res.status(500).json(frame);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    writeSse(res, frame);
+    try { res.end(); } catch {}
   }
 });
 
-app.get('/health', (req, res) => { res.json({ status: 'ok', service: 'shortlinker-mcp', version: '1.3.1' }); });
+app.get('/health', (req, res) => { res.json({ status: 'ok', service: 'shortlinker-mcp', version: '1.3.2' }); });
 
 app.listen(PORT, () => {
   console.log(`🚀 Shortlinker MCP Server running on port ${PORT}`);

@@ -116,7 +116,8 @@ async function handleRpc(body) {
       return broadcast('jsonrpc', jsonRpcSuccess(id, { tools: toolDefinitions }));
     }
     if (method === 'tools/call') {
-      const { name, arguments: args } = params || {};
+      const name = params?.name;
+      const args = params?.arguments;
       if (!tools[name]) {
         return broadcast('jsonrpc', jsonRpcError(id, -32601, `Method not found: ${name}`));
       }

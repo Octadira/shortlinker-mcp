@@ -1,14 +1,18 @@
 {
-  "name": "shortlinker-mcp-v3",
+  "name": "shortlinker-mcp-docker",
   "version": "1.0.0",
-  "description": "Direct node execution test.",
+  "description": "A robust, Dockerized MCP server.",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "@vercel/postgres": "^0.9.0",
     "dotenv": "^16.4.5",
-    "fastify": "^4.28.1"
+    "fastify": "^4.28.1",
+    "@fastify/cors": "^9.0.1",
+    "@fastify/sensible": "^5.6.0",
+    "zod": "^3.23.8"
   }
 }

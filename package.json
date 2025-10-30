@@ -1,11 +1,11 @@
 {
-  "name": "shortlinker-mcp-docker",
+  "name": "shortlinker-mcp-vercel",
   "version": "1.0.0",
-  "description": "A robust, Dockerized MCP server.",
-  "main": "server.js",
+  "description": "A Vercel-based MCP server.",
+  "main": "api/index.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node api/index.js"
   },
   "dependencies": {
     "@vercel/postgres": "^0.9.0",

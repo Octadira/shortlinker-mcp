@@ -6,20 +6,18 @@ import { sql } from '@vercel/postgres';
 import { z } from 'zod';
 
 // --- Configuration ---
-const PORT = process.env.PORT || 3001;
-const HOST = '0.0.0.0';
 const MCP_TOKEN = process.env.MCP_TOKEN;
 const SERVER_URL = process.env.SHORTLINKER_URL || 'https://go4l.ink';
 
 // --- Fastify App Initialization ---
-const fastify = Fastify({
+const app = Fastify({
   logger: true,
 });
 
-fastify.register(cors, { origin: '*' });
-fastify.register(sensible);
+app.register(cors, { origin: '*' });
+app.register(sensible);
 
-// --- Tool Implementation ---
+// --- Tool Implementation (same as before) ---
 const tools = {
   create_short_link: async (args) => {
     const schema = z.object({ long_url: z.string().url(), short_code: z.string().optional() });
@@ -32,7 +30,7 @@ const tools = {
     const schema = z.object({ short_code: z.string().min(1) });
     const { short_code } = schema.parse(args || {});
     const { rows } = await sql`SELECT * FROM links WHERE short_code = ${short_code}`;
-    if (!rows.length) throw fastify.httpErrors.notFound('Link not found');
+    if (!rows.length) throw app.httpErrors.notFound('Link not found');
     const link = rows[0];
     return { content: [{ type: 'text', text: `${SERVER_URL}/${link.short_code} -> ${link.long_url} (${link.clicks || 0} clicks)` }] };
   },
@@ -51,7 +49,7 @@ const tools = {
     const schema = z.object({ short_code: z.string().min(1) });
     const { short_code } = schema.parse(args || {});
     const { rowCount } = await sql`DELETE FROM links WHERE short_code = ${short_code}`;
-    if (!rowCount) throw fastify.httpErrors.notFound('Link not found');
+    if (!rowCount) throw app.httpErrors.notFound('Link not found');
     return { content: [{ type: 'text', text: `Deleted ${short_code}` }] };
   },
 };
@@ -62,80 +60,68 @@ const toolDefinitions = Object.keys(tools).map(name => ({ name, description: `${
 const jsonRpcSuccess = (id, result) => ({ jsonrpc: '2.0', id, result });
 const jsonRpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
 
-// --- SSE Stream Manager ---
-const clients = new Set();
-const broadcast = (event, data) => {
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const client of clients) {
-    client.raw.write(payload);
-  }
+// --- SSE Stream Manager (simplified for serverless) ---
+// Vercel manages connections, we just need to write the response.
+const sendSse = (reply, event, data) => {
+  reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 };
-setInterval(() => broadcast('ping', { ts: Date.now() }), 25000);
 
 // --- Authentication Hook ---
-fastify.addHook('preHandler', (request, reply, done) => {
-  if (request.routeOptions.url === '/health') return done();
+app.addHook('preHandler', (request, reply, done) => {
+  if (request.url === '/api/health') return done();
 
   if (!MCP_TOKEN) {
-    fastify.log.error('MCP_TOKEN is not configured on the server.');
-    throw fastify.httpErrors.internalServerError('Server configuration error');
+    app.log.error('MCP_TOKEN is not configured on the server.');
+    throw app.httpErrors.internalServerError('Server configuration error');
   }
   const token = request.headers.authorization?.slice(7);
   if (token !== MCP_TOKEN) {
-    throw fastify.httpErrors.unauthorized();
+    throw app.httpErrors.unauthorized();
   }
   done();
 });
 
 // --- Routes ---
-fastify.get('/health', (req, reply) => reply.send({ status: 'ok' }));
+app.get('/api/health', (req, reply) => reply.send({ status: 'ok' }));
 
-fastify.all('/mcp', (req, reply) => {
-  const headers = { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' };
-  reply.raw.writeHead(200, headers);
-  clients.add(reply);
-  broadcast('ready', {});
+app.all('/api/mcp', async (req, reply) => {
+  reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  sendSse(reply, 'ready', {});
 
   if (req.method === 'POST') {
-    handleRpc(req.body);
-  }
-
-  req.socket.on('close', () => {
-    clients.delete(reply);
-  });
-});
-
-async function handleRpc(body) {
-  const { jsonrpc, id, method, params } = body;
-  if (jsonrpc !== '2.0' || !method) {
-    return broadcast('jsonrpc', jsonRpcError(id ?? null, -32600, 'Invalid Request'));
-  }
-
-  try {
-    if (method === 'tools/list') {
-      return broadcast('jsonrpc', jsonRpcSuccess(id, { tools: toolDefinitions }));
+    const { jsonrpc, id, method, params } = req.body;
+    if (jsonrpc !== '2.0' || !method) {
+      return sendSse(reply, 'jsonrpc', jsonRpcError(id ?? null, -32600, 'Invalid Request'));
     }
-    if (method === 'tools/call') {
-      const name = params?.name;
-      const args = params?.arguments;
-      if (!tools[name]) {
-        return broadcast('jsonrpc', jsonRpcError(id, -32601, `Method not found: ${name}`));
+
+    try {
+      if (method === 'tools/list') {
+        sendSse(reply, 'jsonrpc', jsonRpcSuccess(id, { tools: toolDefinitions }));
+      } else if (method === 'tools/call') {
+        const name = params?.name;
+        const args = params?.arguments;
+        if (!tools[name]) {
+          sendSse(reply, 'jsonrpc', jsonRpcError(id, -32601, `Method not found: ${name}`));
+        } else {
+          const result = await tools[name](args);
+          sendSse(reply, 'jsonrpc', jsonRpcSuccess(id, result));
+        }
+      } else {
+        sendSse(reply, 'jsonrpc', jsonRpcError(id, -32601, `Method not found: ${method}`));
       }
-      const result = await tools[name](args);
-      return broadcast('jsonrpc', jsonRpcSuccess(id, result));
+    } catch (error) {
+      const message = error.message || 'Internal Server Error';
+      const code = error.statusCode === 404 ? -32601 : -32603;
+      sendSse(reply, 'jsonrpc', jsonRpcError(id, code, message));
     }
-    return broadcast('jsonrpc', jsonRpcError(id, -32601, `Method not found: ${method}`));
-  } catch (error) {
-    const message = error.message || 'Internal Server Error';
-    const code = error.statusCode === 404 ? -32601 : -32603;
-    return broadcast('jsonrpc', jsonRpcError(id, code, message));
   }
-}
-
-// --- Server Start ---
-fastify.listen({ port: PORT, host: HOST }, (err, address) => {
-  if (err) {
-    fastify.log.error(err);
-    process.exit(1);
-  }
+  // For serverless, we don't keep the connection open indefinitely.
+  // Vercel will manage the timeout.
+  reply.raw.end();
 });
+
+// --- Vercel Export ---
+export default async (req, res) => {
+    await app.ready();
+    app.server.emit('request', req, res);
+}
